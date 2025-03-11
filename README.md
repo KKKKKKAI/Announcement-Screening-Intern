@@ -1,1 +1,1 @@
-Building an agentic intern to help monitoring transactions of interest
+Building an agentic intern to help monitoring company's news relating to interest of transactions
