@@ -1,2 +1,5 @@
 downloaded_pages
 summaries
+__pycache__/
+press_release_monitor.log
+press_releases.db
