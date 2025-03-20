@@ -4,18 +4,24 @@ import requests
 from bs4 import BeautifulSoup
 import logging
 
-# Importing our class to test (assuming it's in a file named press_release_monitor.py)
-# If your class is in a different file, adjust this import
-from press_release_monitor import PressReleaseMonitor
+# Import the module (assuming the class is defined in press_release_monitor.py)
+import press_release_monitor
 
 class TestFetchPressReleases(unittest.TestCase):
     def setUp(self):
         # Create a test instance with a dummy URL
-        self.monitor = PressReleaseMonitor(url="https://example.com/press")
+        self.monitor = press_release_monitor.PressReleaseMonitor(url="https://example.com/press")
         
-        # Create a mock logger to avoid writing to actual log files during tests
+        # Setup a mock for the logger that's used in the module
         self.mock_logger = MagicMock()
-        logging.getLogger = MagicMock(return_value=self.mock_logger)
+        # Save the original logger to restore it after tests
+        self.original_logger = press_release_monitor.logger
+        # Replace the module's logger with our mock
+        press_release_monitor.logger = self.mock_logger
+
+    def tearDown(self):
+        # Restore the original logger after each test
+        press_release_monitor.logger = self.original_logger
 
     @patch('requests.get')
     def test_successful_fetch(self, mock_get):
@@ -42,6 +48,9 @@ class TestFetchPressReleases(unittest.TestCase):
         
         # Verify the content is parsed correctly
         self.assertEqual(result.h1.text, "Test Press Release")
+        
+        # Verify logger wasn't called with error
+        self.mock_logger.error.assert_not_called()
 
     @patch('requests.get')
     def test_http_error(self, mock_get):
@@ -57,8 +66,9 @@ class TestFetchPressReleases(unittest.TestCase):
         # Verify error was logged
         self.mock_logger.error.assert_called_once()
         # Check that the error message contains the exception text
-        self.assertIn("Error fetching press releases", self.mock_logger.error.call_args[0][0])
-        self.assertIn("404 Client Error", self.mock_logger.error.call_args[0][0])
+        error_call_args = self.mock_logger.error.call_args[0][0]
+        self.assertIn("Error fetching press releases", error_call_args)
+        self.assertIn("404 Client Error", error_call_args)
 
     @patch('requests.get')
     def test_connection_error(self, mock_get):
@@ -73,7 +83,9 @@ class TestFetchPressReleases(unittest.TestCase):
         
         # Verify error was logged
         self.mock_logger.error.assert_called_once()
-        self.assertIn("Connection refused", self.mock_logger.error.call_args[0][0])
+        error_call_args = self.mock_logger.error.call_args[0][0]
+        self.assertIn("Error fetching press releases", error_call_args)
+        self.assertIn("Connection refused", error_call_args)
 
     @patch('requests.get')
     def test_timeout_error(self, mock_get):
@@ -88,7 +100,9 @@ class TestFetchPressReleases(unittest.TestCase):
         
         # Verify error was logged
         self.mock_logger.error.assert_called_once()
-        self.assertIn("Request timed out", self.mock_logger.error.call_args[0][0])
+        error_call_args = self.mock_logger.error.call_args[0][0]
+        self.assertIn("Error fetching press releases", error_call_args)
+        self.assertIn("Request timed out", error_call_args)
 
 if __name__ == '__main__':
     unittest.main()
