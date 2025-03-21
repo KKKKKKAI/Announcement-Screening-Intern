@@ -3,3 +3,4 @@ summaries
 __pycache__/
 press_release_monitor.log
 press_releases.db
+webpage_downloader.log
