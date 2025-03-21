@@ -285,6 +285,17 @@ class PressReleaseMonitor:
                 logger.error(traceback.format_exc())
                 return []
     
+    def download_new_releases(self, new_releases):
+        """Download the content of newly detected press releases."""
+        if new_releases:
+            import subprocess
+            logger.info(f"Downloading content for {len(new_releases)} new press releases")
+            subprocess.run([
+                "python", "webpage_downloader.py", 
+                "--company", self.company_name,
+                "--days", "1"  # Only get very recent ones
+            ])
+            
     def save_new_releases(self, releases):
         """Save new press releases to the database and return new ones."""
         conn = sqlite3.connect(self.database_path)
@@ -377,6 +388,7 @@ class PressReleaseMonitor:
         
         releases = self.extract_press_releases(soup)
         new_releases = self.save_new_releases(releases)
+        self.download_new_releases(new_releases)
         
         if new_releases:
             logger.info(f"Found {len(new_releases)} new press releases for {self.company_name}")
