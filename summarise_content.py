@@ -37,7 +37,7 @@ def summarize_articles(input_directory, output_directory, model_name="llama3.2")
                 article_content = file.read()
             
             # Create prompt for summarization
-            prompt = f"Please summarize the following article concisely:\n\n{article_content}"
+            prompt = f"Please summarize the following article concisely into bullet points:\n\n{article_content}"
             
             # Generate summary using Ollama
             response = client.generate(model=model_name, prompt=prompt)
