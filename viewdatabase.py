@@ -165,6 +165,49 @@ def get_company_stats(database_path="press_releases.db"):
     except Exception as e:
         print(f"Error: {e}")
 
+def clear_database(database_path="press_releases.db", confirm=True):
+    """
+    Remove all items from the press releases database.
+    
+    Args:
+        database_path (str): Path to the SQLite database
+        confirm (bool): Whether to ask for confirmation before deleting
+    """
+    if not os.path.exists(database_path):
+        print(f"Database file not found: {database_path}")
+        return
+    
+    if confirm:
+        response = input(f"Are you sure you want to delete ALL records from {database_path}? (yes/no): ")
+        if response.lower() not in ['yes', 'y']:
+            print("Operation cancelled.")
+            return
+    
+    try:
+        # Connect to the database
+        conn = sqlite3.connect(database_path)
+        cursor = conn.cursor()
+        
+        # Get count before deletion
+        cursor.execute("SELECT COUNT(*) FROM press_releases")
+        count = cursor.fetchone()[0]
+        
+        # Delete all records
+        cursor.execute("DELETE FROM press_releases")
+        
+        # Commit the changes
+        conn.commit()
+        
+        # Close the connection
+        conn.close()
+        
+        print(f"Successfully deleted {count} records from the database.")
+        
+    except sqlite3.Error as e:
+        print(f"Database error: {e}")
+    except Exception as e:
+        print(f"Error: {e}")
+
 if __name__ == "__main__":
     # Simple command-line interface
     import argparse
@@ -176,10 +219,14 @@ if __name__ == "__main__":
                         help='Output format')
     parser.add_argument('--search', '-s', help='Search term to find in the database')
     parser.add_argument('--stats', action='store_true', help='Show statistics by company')
+    parser.add_argument('--clear', action='store_true', help='Clear all records from the database')
+    parser.add_argument('--force', action='store_true', help='Skip confirmation when clearing database')
     
     args = parser.parse_args()
     
-    if args.stats:
+    if args.clear:
+        clear_database(args.db, not args.force)
+    elif args.stats:
         get_company_stats(args.db)
     elif args.search:
         search_database(args.search, args.db, args.format)
