@@ -188,7 +188,7 @@ def get_latest_press_releases(database_path="press_releases.db", days=1, limit=1
 
 def download_press_releases(releases, output_folder="downloaded_pages", extract_text=True, database_path="press_releases.db"):
     """
-    Download web pages for a list of press releases.
+    Download web pages for a list of press releases and store their content in the database.
     
     Args:
         releases: List of press release dictionaries
@@ -214,14 +214,28 @@ def download_press_releases(releases, output_folder="downloaded_pages", extract_
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             press_release_id INTEGER,
             html_path TEXT,
-            text_path TEXT,
             download_date TEXT,
             FOREIGN KEY (press_release_id) REFERENCES press_releases(id)
         )
         ''')
+        
+        # Create extracted_content table to store the text content
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS extracted_content (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            press_release_id INTEGER,
+            company_name TEXT,
+            title TEXT,
+            content TEXT,
+            extraction_date TEXT,
+            FOREIGN KEY (press_release_id) REFERENCES press_releases(id)
+        )
+        ''')
+        
         conn.commit()
+        logger.info("Database tables ready")
     except sqlite3.Error as e:
-        logger.error(f"Database error setting up downloaded_pages table: {e}")
+        logger.error(f"Database error setting up tables: {e}")
         return 0
     
     success_count = 0
@@ -236,28 +250,34 @@ def download_press_releases(releases, output_folder="downloaded_pages", extract_
         html_path = download_webpage(release['link'], output_folder)
         
         if html_path:
-            text_path = None
-            
-            # Extract text if requested
-            if extract_text:
-                extracted_text = extract_from_local_file(html_path)
-                if extracted_text:
-                    text_path = html_path.replace(".html", ".txt")
-                    try:
-                        with open(text_path, 'w', encoding='utf-8') as file:
-                            file.write(extracted_text)
-                        logger.info(f"Extracted content saved to: {text_path}")
-                    except Exception as e:
-                        logger.error(f"Error saving extracted text: {e}")
-                        text_path = None
-            
             # Record the download in the database
             try:
                 current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                
+                # Insert download record
                 cursor.execute('''
-                INSERT INTO downloaded_pages (press_release_id, html_path, text_path, download_date)
-                VALUES (?, ?, ?, ?)
-                ''', (release['id'], html_path, text_path, current_time))
+                INSERT INTO downloaded_pages (press_release_id, html_path, download_date)
+                VALUES (?, ?, ?)
+                ''', (release['id'], html_path, current_time))
+                
+                # Extract text if requested
+                if extract_text:
+                    extracted_text = extract_from_local_file(html_path)
+                    if extracted_text:
+                        # Store extracted content in the database
+                        cursor.execute('''
+                        INSERT INTO extracted_content (
+                            press_release_id, company_name, title, content, extraction_date
+                        ) VALUES (?, ?, ?, ?, ?)
+                        ''', (
+                            release['id'], 
+                            release.get('company_name', ''), 
+                            release.get('title', ''),
+                            extracted_text,
+                            current_time
+                        ))
+                        logger.info(f"Extracted content stored in database for press release {release['id']}")
+                
                 conn.commit()
                 success_count += 1
             except sqlite3.Error as e:
@@ -279,7 +299,7 @@ def main():
     
     args = parser.parse_args()
     
-    # Ensure download tracking table exists first
+    # Ensure database tables exist
     try:
         conn = sqlite3.connect(args.db)
         cursor = conn.cursor()
@@ -290,15 +310,27 @@ def main():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             press_release_id INTEGER,
             html_path TEXT,
-            text_path TEXT,
             download_date TEXT,
+            FOREIGN KEY (press_release_id) REFERENCES press_releases(id)
+        )
+        ''')
+        
+        # Create extracted_content table
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS extracted_content (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            press_release_id INTEGER,
+            company_name TEXT,
+            title TEXT,
+            content TEXT,
+            extraction_date TEXT,
             FOREIGN KEY (press_release_id) REFERENCES press_releases(id)
         )
         ''')
         conn.commit()
         conn.close()
     except sqlite3.Error as e:
-        logger.error(f"Database error setting up downloaded_pages table: {e}")
+        logger.error(f"Database error setting up tables: {e}")
         return
     
     # Get latest press releases
