@@ -497,6 +497,64 @@ def clear_database(database_path="press_releases.db", table_name=None, confirm=T
     except Exception as e:
         print(f"Error: {e}")
 
+def clear_all_tables(database_path="press_releases.db", confirm=True):
+    """
+    Remove all items from all tables in the database.
+    
+    Args:
+        database_path (str): Path to the SQLite database
+        confirm (bool): Whether to ask for confirmation before deleting
+    """
+    if not os.path.exists(database_path):
+        print(f"Database file not found: {database_path}")
+        return
+    
+    # Get all tables in the database
+    tables = get_all_tables(database_path)
+    if not tables:
+        print("No tables found in the database.")
+        return
+    
+    if confirm:
+        response = input(f"⚠️ WARNING: This will delete ALL records from ALL {len(tables)} tables in the database!\nAre you absolutely sure? (yes/no): ")
+        if response.lower() not in ['yes', 'y']:
+            print("Operation cancelled.")
+            return
+    
+    try:
+        # Connect to the database
+        conn = sqlite3.connect(database_path)
+        conn.execute("PRAGMA foreign_keys = OFF")  # Temporarily disable foreign key constraints
+        cursor = conn.cursor()
+        
+        total_deleted = 0
+        table_counts = {}
+        
+        for table in tables:
+            # Get count before deletion
+            cursor.execute(f"SELECT COUNT(*) FROM {table}")
+            count = cursor.fetchone()[0]
+            table_counts[table] = count
+            
+            # Delete all records
+            cursor.execute(f"DELETE FROM {table}")
+            total_deleted += count
+        
+        # Commit the changes
+        conn.commit()
+        conn.execute("PRAGMA foreign_keys = ON")  # Re-enable foreign key constraints
+        conn.close()
+        
+        # Print results
+        print(f"Successfully deleted {total_deleted} records from {len(tables)} tables:")
+        for table, count in table_counts.items():
+            print(f"  - {table}: {count} records deleted")
+        
+    except sqlite3.Error as e:
+        print(f"Database error: {e}")
+    except Exception as e:
+        print(f"Error: {e}")
+
 if __name__ == "__main__":
     # Command-line interface with enhanced functionality
     import argparse
@@ -543,13 +601,40 @@ if __name__ == "__main__":
     stats_parser = subparsers.add_parser('stats', help='Show statistics by company')
     stats_parser.add_argument('--db', '-d', default='press_releases.db', help='Path to the database file')
     
-    # Clear command
+    # Clear table command
     clear_parser = subparsers.add_parser('clear', help='Clear all records from a table')
     clear_parser.add_argument('--db', '-d', default='press_releases.db', help='Path to the database file')
     clear_parser.add_argument('--table', '-t', help='Table to clear (default: press_releases)')
     clear_parser.add_argument('--force', action='store_true', help='Skip confirmation when clearing table')
     
+    # Clear all tables command
+    clearall_parser = subparsers.add_parser('clearall', help='Clear all records from ALL tables')
+    clearall_parser.add_argument('--db', '-d', default='press_releases.db', help='Path to the database file')
+    clearall_parser.add_argument('--force', action='store_true', help='Skip confirmation when clearing all tables')
+    
+    # Add backward compatibility with the original script's arguments
+    parser.add_argument('--db', '-d', default='press_releases.db', help='Path to the database file')
+    parser.add_argument('--limit', '-l', type=int, help='Limit the number of records to display')
+    parser.add_argument('--format', '-f', choices=['table', 'csv', 'json'], default='table', help='Output format')
+    parser.add_argument('--search', '-s', help='Search term to find in the database')
+    parser.add_argument('--stats', action='store_true', help='Show statistics by company')
+    parser.add_argument('--clear', action='store_true', help='Clear all records from ALL tables')
+    parser.add_argument('--force', action='store_true', help='Skip confirmation when clearing database')
+    
     args = parser.parse_args()
+    
+    # Handle special case for backward compatibility
+    if args.clear:
+        # The --clear flag now clears ALL tables
+        clear_all_tables(args.db, not args.force)
+        sys.exit(0)
+    elif args.stats:
+        get_company_stats(args.db)
+        sys.exit(0)
+    elif args.search:
+        # Old style search - search across title, summary, and link
+        search_database(args.search, args.db, args.format)
+        sys.exit(0)
     
     # Determine and execute the requested command
     if args.command == 'view' or args.command is None:  # Default to view if no command specified
@@ -578,6 +663,9 @@ if __name__ == "__main__":
     
     elif args.command == 'clear':
         clear_database(args.db, args.table, not args.force)
+    
+    elif args.command == 'clearall':
+        clear_all_tables(args.db, not args.force)
     
     else:
         # Show help if no valid command is provided
