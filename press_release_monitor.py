@@ -6,6 +6,9 @@ import time
 import hashlib
 import logging
 import smtplib
+import importlib.util
+import inspect
+import re
 from email.message import EmailMessage
 from datetime import datetime
 import schedule
@@ -22,116 +25,138 @@ logging.basicConfig(
 logger = logging.getLogger('press_release_monitor')
 
 class PressReleaseMonitor:
-    def __init__(self, url, database_path="press_releases.db", email_config=None):
+    def __init__(self, url, company_name, extractor_path=None, database_path="press_releases.db", email_config=None):
         """
         Initialize the press release monitor.
         
         Args:
             url (str): URL of the press release page to monitor
+            company_name (str): Name of the company being monitored
+            extractor_path (str): Path to the Python file containing the custom extractor function
             database_path (str): Path to the SQLite database
             email_config (dict): Configuration for email notifications
         """
         self.url = url
+        self.company_name = company_name
         self.database_path = database_path
         self.email_config = email_config
+        self.extractor_func = self._load_extractor(extractor_path)
         self.setup_database()
         
-    def setup_database(self):
-        """Set up the SQLite database to store press release data."""
-        conn = sqlite3.connect(self.database_path)
-        cursor = conn.cursor()
-        
-        # Create table if it doesn't exist
-        cursor.execute('''
-        CREATE TABLE IF NOT EXISTS press_releases (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            title TEXT,
-            link TEXT UNIQUE,
-            summary TEXT,
-            date TEXT,
-            content_hash TEXT,
-            first_seen TEXT,
-            last_checked TEXT
-        )
-        ''')
-        
-        conn.commit()
-        conn.close()
-        logger.info(f"Database setup completed at {self.database_path}")
-        
-    def fetch_press_releases(self):
-        """Fetch and parse the press release page."""
-        try:        
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-                'Accept-Language': '*',  # Accept all languages
-                'Accept-Encoding': 'identity',  # Request uncompressed content
-                'Connection': 'keep-alive',
-                'Cache-Control': 'max-age=0',
-            }
-            response = requests.get(self.url, headers=headers, timeout=30)
-            response.raise_for_status()
-            return BeautifulSoup(response.text, 'html.parser')
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Error fetching press releases: {e}")
-            return None
-            
-    def extract_press_releases(self, soup):
+    def _load_extractor(self, extractor_path):
         """
-        Extract press releases from the Thames Water press releases page.
+        Load the custom extractor function from a file.
+        
+        Args:
+            extractor_path (str): Path to the Python file containing the extractor function
+            
+        Returns:
+            function: The loaded extractor function or default extractor if path is None
+        """
+        if not extractor_path:
+            logger.info("No custom extractor provided, using default extractor")
+            return self._default_extract_press_releases
+            
+        try:
+            logger.info(f"Loading custom extractor from {extractor_path}")
+            
+            # Load the module from file path
+            spec = importlib.util.spec_from_file_location("extractor_module", extractor_path)
+            extractor_module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(extractor_module)
+            
+            # Find extraction function in the module
+            for name, obj in inspect.getmembers(extractor_module):
+                if name == "extract_press_releases" and inspect.isfunction(obj):
+                    logger.info(f"Successfully loaded extractor function: {name}")
+                    return obj
+                    
+            # If function not found, fall back to default
+            logger.warning(f"No 'extract_press_releases' function found in {extractor_path}, using default extractor")
+            return self._default_extract_press_releases
+            
+        except Exception as e:
+            logger.error(f"Error loading custom extractor: {e}")
+            logger.info("Falling back to default extractor")
+            return self._default_extract_press_releases
+    
+    def _default_extract_press_releases(self, soup, base_url):
+        """
+        Default extractor for press releases from HTML.
         
         Args:
             soup (BeautifulSoup): Parsed HTML
-            base_url (str, optional): Base URL for resolving relative links
+            base_url (str): Base URL for resolving relative links
             
         Returns:
             list: List of dictionaries containing press release information
         """
-        # If base_url is not provided, attempt to determine it from the soup's URL
         releases = []
         
         try:
-            # Find press release items using Thames Water specific selectors
-            press_items = soup.select('a.Article-module__article__lWN7y')
+            # Try multiple common selectors for press releases
+            selectors = [
+                '.press-release-item, .news-item, article, .press-release',
+                '.news-listing article, .press-releases li, .news-container .item',
+                'a.news-item, a.press-item, div.press-item, div.news-item',
+                '.news a, .press a, .press-releases a'
+            ]
             
-            logger.info(f"Found {len(press_items)} press release items")
+            press_items = []
+            for selector in selectors:
+                items = soup.select(selector)
+                if items:
+                    press_items = items
+                    logger.info(f"Found {len(items)} press items using selector: {selector}")
+                    break
+            
+            # If still not found, try to look for items with news/press in class name
+            if not press_items:
+                press_items = soup.find_all(['div', 'article', 'li', 'a'], class_=lambda c: c and ('news' in c.lower() or 'press' in c.lower()))
+                logger.info(f"Found {len(press_items)} press items using class name search")
+            
+            # If still not found, look for anchor tags with date-like strings
+            if not press_items:
+                all_links = soup.find_all('a')
+                date_pattern = r'(20\d{2}|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)'
+                press_items = [link for link in all_links if link.text and re.search(date_pattern, link.text.lower())]
+                logger.info(f"Found {len(press_items)} press items using date pattern search")
             
             for item in press_items:
-                # Extract article URL
-                link = item.get('href', '')
+                # Try multiple selectors for title and link
+                title_element = None
+                for title_selector in ['h2', 'h3', 'h4', '.title', '.headline', 'strong', 'b']:
+                    title_element = item.select_one(title_selector)
+                    if title_element:
+                        break
                 
-                # Extract title
-                title_element = item.select_one('h3.Typography-module__heading-4__exIrU')
+                # Find link element - either the item itself (if it's an <a>) or an <a> inside it
+                link_element = item if item.name == 'a' else item.find('a')
                 
-                # Extract date/time
-                date_element = item.select_one('time')
+                # Try to find date element
+                date_element = None
+                for date_selector in ['.date', 'time', '.published', '.timestamp', '.meta', 'span']:
+                    date_element = item.select_one(date_selector)
+                    if date_element:
+                        break
                 
-                # Extract summary
-                summary_element = item.select_one('div.BasicHtml-module__main__3BwiX p')
+                # Try to find summary element
+                summary_element = None
+                for summary_selector in ['.summary', '.excerpt', '.description', 'p', '.teaser']:
+                    summary_element = item.select_one(summary_selector)
+                    if summary_element:
+                        break
                 
-                if title_element and link:
+                if title_element and link_element:
                     title = title_element.get_text(strip=True)
+                    link = link_element.get('href')
                     
                     # Handle relative URLs
-                    if link.startswith('/'):
-                        link = self.url + link
+                    if link and link.startswith('/'):
+                        link = base_url + link
                     
                     # Extract date if available, or use current date
                     date = date_element.get_text(strip=True) if date_element else datetime.now().strftime('%Y-%m-%d')
-                    
-                    # Format date to be consistent (if possible)
-                    try:
-                        # Try to parse various date formats
-                        if re.match(r'\d{2}/\d{2} \d{2}:\d{2}', date):
-                            # Format: "20/03 13:30"
-                            day, month = date.split(' ')[0].split('/')
-                            # Assuming current year since only day/month is provided
-                            year = datetime.now().year
-                            date = f"{year}-{month}-{day}"
-                    except Exception:
-                        # Keep original date format if parsing fails
-                        pass
                     
                     # Extract summary if available
                     summary = summary_element.get_text(strip=True) if summary_element else ''
@@ -151,11 +176,114 @@ class PressReleaseMonitor:
             logger.info(f"Extracted {len(releases)} press releases")
         except Exception as e:
             logger.error(f"Error extracting press releases: {e}")
-            # Print the traceback for better debugging
             import traceback
             logger.error(traceback.format_exc())
         
         return releases
+    
+    def setup_database(self):
+        """Set up the SQLite database to store press release data."""
+        conn = sqlite3.connect(self.database_path)
+        cursor = conn.cursor()
+        
+        # Check if company_name column exists, if not, add it
+        cursor.execute("PRAGMA table_info(press_releases)")
+        columns = [info[1] for info in cursor.fetchall()]
+        
+        # Create table if it doesn't exist
+        if 'press_releases' not in [table[0] for table in cursor.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]:
+            cursor.execute('''
+            CREATE TABLE press_releases (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                company_name TEXT,
+                title TEXT,
+                link TEXT,
+                summary TEXT,
+                date TEXT,
+                content_hash TEXT,
+                first_seen TEXT,
+                last_checked TEXT,
+                UNIQUE(company_name, link)
+            )
+            ''')
+            logger.info("Created new press_releases table with company_name column")
+        elif 'company_name' not in columns:
+            # Add company_name column if it doesn't exist and table already exists
+            cursor.execute("ALTER TABLE press_releases ADD COLUMN company_name TEXT")
+            logger.info("Added company_name column to existing press_releases table")
+            
+            # Remove old unique constraint and add a new one including company_name
+            try:
+                # SQLite doesn't support DROP CONSTRAINT directly, need to recreate table
+                cursor.execute('''
+                CREATE TABLE press_releases_new (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    company_name TEXT,
+                    title TEXT,
+                    link TEXT,
+                    summary TEXT,
+                    date TEXT,
+                    content_hash TEXT,
+                    first_seen TEXT,
+                    last_checked TEXT,
+                    UNIQUE(company_name, link)
+                )
+                ''')
+                
+                # Copy data from old table to new
+                cursor.execute('''
+                INSERT INTO press_releases_new(id, title, link, summary, date, content_hash, first_seen, last_checked)
+                SELECT id, title, link, summary, date, content_hash, first_seen, last_checked FROM press_releases
+                ''')
+                
+                # Drop old table and rename new one
+                cursor.execute("DROP TABLE press_releases")
+                cursor.execute("ALTER TABLE press_releases_new RENAME TO press_releases")
+                logger.info("Restructured table to include company_name in uniqueness constraint")
+            except sqlite3.Error as e:
+                logger.error(f"Error restructuring database: {e}")
+        
+        conn.commit()
+        conn.close()
+        logger.info(f"Database setup completed at {self.database_path}")
+        
+    def fetch_press_releases(self):
+        """Fetch and parse the press release page."""
+        try:
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            }
+            response = requests.get(self.url, headers=headers, timeout=30)
+            response.raise_for_status()
+            return BeautifulSoup(response.text, 'html.parser')
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Error fetching press releases: {e}")
+            return None
+    
+    def extract_press_releases(self, soup):
+        """
+        Extract press releases from the parsed HTML using the loaded extractor function.
+        
+        Args:
+            soup (BeautifulSoup): Parsed HTML
+            
+        Returns:
+            list: List of dictionaries containing press release information
+        """
+        base_url = '/'.join(self.url.split('/')[:3])  # Extract base URL (e.g., https://example.com)
+        
+        try:
+            # Call the extractor function with soup and base_url
+            return self.extractor_func(soup, base_url)
+        except TypeError:
+            # Some older extractors might not accept base_url, try with just soup
+            try:
+                return self.extractor_func(soup)
+            except Exception as e:
+                logger.error(f"Error calling extractor function: {e}")
+                import traceback
+                logger.error(traceback.format_exc())
+                return []
     
     def save_new_releases(self, releases):
         """Save new press releases to the database and return new ones."""
@@ -166,10 +294,14 @@ class PressReleaseMonitor:
         current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         
         for release in releases:
-            # Check if this release exists
+            # Skip entries without essential data
+            if not release.get('title') or not release.get('link'):
+                continue
+                
+            # Check if this release exists for this company
             cursor.execute(
-                "SELECT id FROM press_releases WHERE link = ? OR content_hash = ?", 
-                (release['link'], release['content_hash'])
+                "SELECT id FROM press_releases WHERE company_name = ? AND (link = ? OR content_hash = ?)", 
+                (self.company_name, release['link'], release['content_hash'])
             )
             
             existing = cursor.fetchone()
@@ -177,29 +309,32 @@ class PressReleaseMonitor:
             if not existing:
                 # This is a new release
                 cursor.execute('''
-                INSERT INTO press_releases (title, link, summary, date, content_hash, first_seen, last_checked)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO press_releases (company_name, title, link, summary, date, content_hash, first_seen, last_checked)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (
+                    self.company_name,
                     release['title'],
                     release['link'],
-                    release['summary'],
-                    release['date'],
+                    release.get('summary', ''),
+                    release.get('date', current_time),
                     release['content_hash'],
                     current_time,
                     current_time
                 ))
+                # Add company name to the release data for notifications
+                release['company_name'] = self.company_name
                 new_releases.append(release)
             else:
                 # Update last_checked timestamp
                 cursor.execute(
-                    "UPDATE press_releases SET last_checked = ? WHERE link = ?",
-                    (current_time, release['link'])
+                    "UPDATE press_releases SET last_checked = ? WHERE company_name = ? AND link = ?",
+                    (current_time, self.company_name, release['link'])
                 )
         
         conn.commit()
         conn.close()
         
-        logger.info(f"Found {len(new_releases)} new press releases")
+        logger.info(f"Found {len(new_releases)} new press releases for {self.company_name}")
         return new_releases
     
     def send_email_notification(self, new_releases):
@@ -209,16 +344,16 @@ class PressReleaseMonitor:
         
         try:
             msg = EmailMessage()
-            msg['Subject'] = f"[Press Release Alert] {len(new_releases)} New Press Releases"
+            msg['Subject'] = f"[Press Release Alert] {len(new_releases)} New Press Releases from {self.company_name}"
             msg['From'] = self.email_config['from']
             msg['To'] = self.email_config['to']
             
-            content = "New press releases detected:\n\n"
+            content = f"New press releases detected from {self.company_name}:\n\n"
             for idx, release in enumerate(new_releases, 1):
                 content += f"{idx}. {release['title']}\n"
-                content += f"   Date: {release['date']}\n"
+                content += f"   Date: {release.get('date', 'N/A')}\n"
                 content += f"   Link: {release['link']}\n"
-                if release['summary']:
+                if release.get('summary'):
                     content += f"   Summary: {release['summary']}\n"
                 content += "\n"
             
@@ -228,13 +363,13 @@ class PressReleaseMonitor:
                 server.login(self.email_config['username'], self.email_config['password'])
                 server.send_message(msg)
                 
-            logger.info("Email notification sent successfully")
+            logger.info(f"Email notification sent successfully for {self.company_name}")
         except Exception as e:
             logger.error(f"Error sending email notification: {e}")
     
     def check_for_updates(self):
         """Main function to check for updates."""
-        logger.info(f"Checking for updates at {self.url}")
+        logger.info(f"Checking for updates at {self.url} for {self.company_name}")
         
         soup = self.fetch_press_releases()
         if not soup:
@@ -244,46 +379,97 @@ class PressReleaseMonitor:
         new_releases = self.save_new_releases(releases)
         
         if new_releases:
-            logger.info(f"Found {len(new_releases)} new press releases")
+            logger.info(f"Found {len(new_releases)} new press releases for {self.company_name}")
             for release in new_releases:
-                logger.info(f"New release: {release['title']} - {release['link']}")
+                logger.info(f"New release for {self.company_name}: {release['title']} - {release['link']}")
             
             if self.email_config:
                 self.send_email_notification(new_releases)
         else:
-            logger.info("No new press releases found")
+            logger.info(f"No new press releases found for {self.company_name}")
         
         return new_releases
 
-def run_daily_check(url, email_config=None):
+
+def run_daily_check(url, company_name, extractor_path=None, email_config=None):
     """Run the press release check once."""
-    monitor = PressReleaseMonitor(url, email_config=email_config)
+    monitor = PressReleaseMonitor(url, company_name, extractor_path=extractor_path, email_config=email_config)
     return monitor.check_for_updates()
 
-def setup_scheduled_checks(url, time_of_day="09:00", email_config=None):
+
+def setup_scheduled_checks(url, company_name, time_of_day="09:00", extractor_path=None, email_config=None):
     """Set up scheduled daily checks."""
-    logger.info(f"Setting up scheduled checks for {url} at {time_of_day} daily")
+    logger.info(f"Setting up scheduled checks for {company_name} at {url} at {time_of_day} daily")
     
-    monitor = PressReleaseMonitor(url, email_config=email_config)
-    logger.info("Starting scheduler...")
-
+    monitor = PressReleaseMonitor(url, company_name, extractor_path=extractor_path, email_config=email_config)
+    
+    # Run an immediate check
     monitor.check_for_updates()
-
+    
     # def job():
     #     monitor.check_for_updates()
     
     # schedule.every().day.at(time_of_day).do(job)
     
-    # logger.info("Starting scheduler...")
-    # while True:
-    #     schedule.run_pending()
-    #     time.sleep(60)
+    # logger.info(f"Scheduled daily checks for {company_name} at {time_of_day}")
+    # return monitor
+
+
+def run_multiple_companies(companies, email_config=None):
+    """
+    Run checks for multiple companies.
+    
+    Args:
+        companies (list): List of dictionaries containing company information
+                          Each dict should have 'name', 'url', and optionally 'extractor'
+        email_config (dict): Email configuration for notifications
+    """
+    monitors = []
+    
+    for company in companies:
+        logger.info(f"Setting up monitor for {company['name']}")
+        monitor = PressReleaseMonitor(
+            url=company['url'],
+            company_name=company['name'],
+            extractor_path=company.get('extractor'),
+            email_config=email_config
+        )
+        
+        # Run an immediate check
+        monitor.check_for_updates()
+        monitors.append(monitor)
+    
+    # Schedule daily checks for all companies
+    for i, company in enumerate(companies):
+        time_offset = i * 1  # Stagger checks by 5 minutes per company
+        hour = 9
+        minute = time_offset % 60
+        hour += time_offset // 60
+        time_str = f"{hour:02d}:{minute:02d}"
+        
+        schedule.every().day.at(time_str).do(monitors[i].check_for_updates)
+        logger.info(f"Scheduled daily check for {company['name']} at {time_str}")
+    
+    # Run the schedule
+    logger.info("Starting scheduler for all companies...")
+    while True:
+        schedule.run_pending()
+        time.sleep(60)
+
 
 if __name__ == "__main__":
-    # Example usage
-    COMPANY_URL = "https://www.thameswater.co.uk/news"
+    import argparse
     
-    # Optional: Email configuration
+    parser = argparse.ArgumentParser(description='Monitor press releases from company websites')
+    parser.add_argument('--url', required=False, help='URL of the press release page')
+    parser.add_argument('--company', required=False, help='Name of the company')
+    parser.add_argument('--extractor', help='Path to custom extractor function')
+    parser.add_argument('--time', default="09:00", help='Time to run the daily check (HH:MM)')
+    parser.add_argument('--config', help='Path to JSON file with multiple company configurations')
+    
+    args = parser.parse_args()
+    
+    # Email configuration - update with your details or load from a config file
     EMAIL_CONFIG = {
         'smtp_server': 'smtp.gmail.com',
         'smtp_port': 465,
@@ -293,8 +479,54 @@ if __name__ == "__main__":
         'to': 'recipient@example.com'
     }
     
-    # Uncomment to run once
-    # run_daily_check(COMPANY_URL, email_config=EMAIL_CONFIG)
-    
-    # Uncomment to set up scheduled checks
-    setup_scheduled_checks(COMPANY_URL, time_of_day="01:18", email_config=EMAIL_CONFIG)
+    # If config file is provided, load multiple companies
+    if args.config:
+        import json
+        try:
+            with open(args.config, 'r') as f:
+                companies = json.load(f)
+            run_multiple_companies(companies, email_config=EMAIL_CONFIG)
+        except Exception as e:
+            logger.error(f"Error loading config file: {e}")
+            sys.exit(1)
+    # Otherwise run for a single company
+    elif args.url and args.company:
+        setup_scheduled_checks(
+            url=args.url,
+            company_name=args.company,
+            time_of_day=args.time,
+            extractor_path=args.extractor,
+            email_config=EMAIL_CONFIG
+        )
+        
+        # Run the schedule
+        logger.info("Starting scheduler...")
+        while True:
+            schedule.run_pending()
+            time.sleep(60)
+    else:
+        # Example usage with hardcoded values
+        companies = [
+            {
+                "name": "Thames Water",
+                "url": "https://www.thameswater.co.uk/about-us/newsroom/latest-news",
+                "extractor": "extractors/thames_water.py"
+            }
+        ]
+        
+        # Uncomment to run multiple companies
+        # run_multiple_companies(companies, email_config=EMAIL_CONFIG)
+        
+        # Or run a single company
+        setup_scheduled_checks(
+            url=companies[0]["url"],
+            company_name=companies[0]["name"],
+            extractor_path=companies[0]["extractor"],
+            email_config=EMAIL_CONFIG
+        )
+        
+        # Run the schedule
+        logger.info("Starting scheduler...")
+        while True:
+            schedule.run_pending()
+            time.sleep(60)
