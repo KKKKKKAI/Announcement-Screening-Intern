@@ -61,9 +61,14 @@ class PressReleaseMonitor:
         
     def fetch_press_releases(self):
         """Fetch and parse the press release page."""
-        try:
+        try:        
             headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                'Accept-Language': '*',  # Accept all languages
+                'Accept-Encoding': 'identity',  # Request uncompressed content
+                'Connection': 'keep-alive',
+                'Cache-Control': 'max-age=0',
             }
             response = requests.get(self.url, headers=headers, timeout=30)
             response.raise_for_status()
@@ -74,45 +79,59 @@ class PressReleaseMonitor:
             
     def extract_press_releases(self, soup):
         """
-        Extract press releases from the parsed HTML.
+        Extract press releases from the Thames Water press releases page.
         
-        This is a generic implementation. You'll need to customize this method
-        for the specific website structure you're monitoring.
+        Args:
+            soup (BeautifulSoup): Parsed HTML
+            base_url (str, optional): Base URL for resolving relative links
+            
+        Returns:
+            list: List of dictionaries containing press release information
         """
+        # If base_url is not provided, attempt to determine it from the soup's URL
         releases = []
         
-        # This is a generic implementation - adjust the selectors for your specific website
-        # Example for a common structure:
         try:
-            # Find press release container (adjust these selectors for the specific site)
-            press_items = soup.select('.press-release-item, .news-item, article, .press-release')
+            # Find press release items using Thames Water specific selectors
+            press_items = soup.select('a.Article-module__article__lWN7y')
             
-            if not press_items:
-                # Alternative selectors if the above don't work
-                press_items = soup.select('.news-listing article, .press-releases li, .news-container .item')
-            
-            if not press_items:
-                # If still not found, try to look for a list of news items
-                press_items = soup.find_all('div', class_=lambda c: c and ('news' in c.lower() or 'press' in c.lower()))
+            logger.info(f"Found {len(press_items)} press release items")
             
             for item in press_items:
-                # Try to extract title and link
-                title_element = item.select_one('h2, h3, .title, a strong')
-                link_element = item.select_one('a')
-                date_element = item.select_one('.date, time, .published, .timestamp')
-                summary_element = item.select_one('.summary, .excerpt, .description, p')
+                # Extract article URL
+                link = item.get('href', '')
                 
-                if title_element and link_element:
+                # Extract title
+                title_element = item.select_one('h3.Typography-module__heading-4__exIrU')
+                
+                # Extract date/time
+                date_element = item.select_one('time')
+                
+                # Extract summary
+                summary_element = item.select_one('div.BasicHtml-module__main__3BwiX p')
+                
+                if title_element and link:
                     title = title_element.get_text(strip=True)
-                    link = link_element['href']
                     
                     # Handle relative URLs
                     if link.startswith('/'):
-                        base_url = '/'.join(self.url.split('/')[:3])  # Extract base URL
-                        link = base_url + link
+                        link = self.url + link
                     
-                    # Extract date if available
+                    # Extract date if available, or use current date
                     date = date_element.get_text(strip=True) if date_element else datetime.now().strftime('%Y-%m-%d')
+                    
+                    # Format date to be consistent (if possible)
+                    try:
+                        # Try to parse various date formats
+                        if re.match(r'\d{2}/\d{2} \d{2}:\d{2}', date):
+                            # Format: "20/03 13:30"
+                            day, month = date.split(' ')[0].split('/')
+                            # Assuming current year since only day/month is provided
+                            year = datetime.now().year
+                            date = f"{year}-{month}-{day}"
+                    except Exception:
+                        # Keep original date format if parsing fails
+                        pass
                     
                     # Extract summary if available
                     summary = summary_element.get_text(strip=True) if summary_element else ''
@@ -132,6 +151,9 @@ class PressReleaseMonitor:
             logger.info(f"Extracted {len(releases)} press releases")
         except Exception as e:
             logger.error(f"Error extracting press releases: {e}")
+            # Print the traceback for better debugging
+            import traceback
+            logger.error(traceback.format_exc())
         
         return releases
     
@@ -243,20 +265,23 @@ def setup_scheduled_checks(url, time_of_day="09:00", email_config=None):
     logger.info(f"Setting up scheduled checks for {url} at {time_of_day} daily")
     
     monitor = PressReleaseMonitor(url, email_config=email_config)
-    
-    def job():
-        monitor.check_for_updates()
-    
-    schedule.every().day.at(time_of_day).do(job)
-    
     logger.info("Starting scheduler...")
-    while True:
-        schedule.run_pending()
-        time.sleep(60)
+
+    monitor.check_for_updates()
+
+    # def job():
+    #     monitor.check_for_updates()
+    
+    # schedule.every().day.at(time_of_day).do(job)
+    
+    # logger.info("Starting scheduler...")
+    # while True:
+    #     schedule.run_pending()
+    #     time.sleep(60)
 
 if __name__ == "__main__":
     # Example usage
-    COMPANY_URL = "https://example.com/press-releases"
+    COMPANY_URL = "https://www.thameswater.co.uk/news"
     
     # Optional: Email configuration
     EMAIL_CONFIG = {
@@ -272,4 +297,4 @@ if __name__ == "__main__":
     # run_daily_check(COMPANY_URL, email_config=EMAIL_CONFIG)
     
     # Uncomment to set up scheduled checks
-    setup_scheduled_checks(COMPANY_URL, time_of_day="09:00", email_config=EMAIL_CONFIG)
+    setup_scheduled_checks(COMPANY_URL, time_of_day="01:18", email_config=EMAIL_CONFIG)
