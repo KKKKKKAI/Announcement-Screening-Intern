@@ -1,0 +1,7 @@
+[
+    {
+      "name": "Thames Water",
+      "url": "https://www.thameswater.co.uk/about-us/newsroom/latest-news",
+      "extractor": "extractors/thames_water.py"
+    }
+  ]
