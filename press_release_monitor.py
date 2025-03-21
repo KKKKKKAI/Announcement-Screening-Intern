@@ -9,6 +9,8 @@ import smtplib
 import importlib.util
 import inspect
 import re
+import subprocess
+import ollama
 from email.message import EmailMessage
 from datetime import datetime
 import schedule
@@ -25,7 +27,8 @@ logging.basicConfig(
 logger = logging.getLogger('press_release_monitor')
 
 class PressReleaseMonitor:
-    def __init__(self, url, company_name, extractor_path=None, database_path="press_releases.db", email_config=None):
+    def __init__(self, url, company_name, extractor_path=None, database_path="press_releases.db", 
+                 email_config=None, summarization_model="llama3.2"):
         """
         Initialize the press release monitor.
         
@@ -35,11 +38,13 @@ class PressReleaseMonitor:
             extractor_path (str): Path to the Python file containing the custom extractor function
             database_path (str): Path to the SQLite database
             email_config (dict): Configuration for email notifications
+            summarization_model (str): Ollama model to use for summarization
         """
         self.url = url
         self.company_name = company_name
         self.database_path = database_path
         self.email_config = email_config
+        self.summarization_model = summarization_model
         self.extractor_func = self._load_extractor(extractor_path)
         self.setup_database()
         
@@ -243,6 +248,21 @@ class PressReleaseMonitor:
             except sqlite3.Error as e:
                 logger.error(f"Error restructuring database: {e}")
         
+        # Set up article_summaries table if it doesn't exist
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS article_summaries (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            content_id INTEGER NOT NULL,
+            summary TEXT NOT NULL,
+            model_name TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (content_id) REFERENCES extracted_content(id)
+        )
+        ''')
+        
+        # Create index for faster lookups
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_content_id ON article_summaries(content_id)')
+        
         conn.commit()
         conn.close()
         logger.info(f"Database setup completed at {self.database_path}")
@@ -288,14 +308,115 @@ class PressReleaseMonitor:
     def download_new_releases(self, new_releases):
         """Download the content of newly detected press releases."""
         if new_releases:
-            import subprocess
-            logger.info(f"Downloading content for {len(new_releases)} new press releases")
-            subprocess.run([
-                "python", "webpage_downloader.py", 
-                "--company", self.company_name,
-                "--days", "1"  # Only get very recent ones
-            ])
+            try:
+                logger.info(f"Downloading content for {len(new_releases)} new press releases")
+                subprocess.run([
+                    "python", "webpage_downloader.py", 
+                    "--company", self.company_name,
+                    "--days", "1"  # Only get very recent ones
+                ], check=True)
+                return True
+            except subprocess.SubprocessError as e:
+                logger.error(f"Error downloading content: {e}")
+                return False
+        return False
+    
+    def get_extracted_content_ids(self, press_release_ids):
+        """
+        Get extracted content IDs for the given press release IDs.
+        
+        Args:
+            press_release_ids (list): List of press release IDs
             
+        Returns:
+            dict: Mapping of press release IDs to extracted content IDs
+        """
+        if not press_release_ids:
+            return {}
+            
+        conn = sqlite3.connect(self.database_path)
+        cursor = conn.cursor()
+        
+        # Build placeholders for SQL IN clause
+        placeholders = ','.join(['?'] * len(press_release_ids))
+        
+        # Query content IDs
+        cursor.execute(f'''
+        SELECT press_release_id, id 
+        FROM extracted_content 
+        WHERE press_release_id IN ({placeholders})
+        ''', press_release_ids)
+        
+        id_mapping = {row[0]: row[1] for row in cursor.fetchall()}
+        conn.close()
+        
+        return id_mapping
+    
+    def summarize_content(self, content_ids):
+        """
+        Generate summaries for the given content IDs.
+        
+        Args:
+            content_ids (list): List of content IDs to summarize
+            
+        Returns:
+            dict: Mapping of content IDs to summaries
+        """
+        if not content_ids:
+            return {}
+            
+        conn = sqlite3.connect(self.database_path)
+        cursor = conn.cursor()
+        
+        # Initialize Ollama client
+        client = ollama.Client()
+        summaries = {}
+        
+        for content_id in content_ids:
+            # Check if summary already exists
+            cursor.execute(
+                "SELECT id, summary FROM article_summaries WHERE content_id = ?", 
+                (content_id,)
+            )
+            existing = cursor.fetchone()
+            
+            if existing:
+                # Use existing summary
+                summaries[content_id] = existing[1]
+                logger.info(f"Using existing summary for content ID {content_id}")
+            else:
+                # Get content to summarize
+                cursor.execute(
+                    "SELECT content FROM extracted_content WHERE id = ?", 
+                    (content_id,)
+                )
+                content_row = cursor.fetchone()
+                
+                if content_row and content_row[0]:
+                    try:
+                        # Create prompt for summarization
+                        prompt = f"Please summarize the following article concisely into bullet points:\n\n{content_row[0]}"
+                        
+                        # Generate summary using Ollama
+                        response = client.generate(model=self.summarization_model, prompt=prompt)
+                        summary = response.response
+                        
+                        # Save summary to database
+                        current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                        cursor.execute(
+                            'INSERT INTO article_summaries (content_id, summary, model_name, created_at) VALUES (?, ?, ?, ?)',
+                            (content_id, summary, self.summarization_model, current_time)
+                        )
+                        conn.commit()
+                        
+                        summaries[content_id] = summary
+                        logger.info(f"Generated new summary for content ID {content_id}")
+                    except Exception as e:
+                        logger.error(f"Error generating summary for content ID {content_id}: {str(e)}")
+        
+        conn.close()
+        return summaries
+    
     def save_new_releases(self, releases):
         """Save new press releases to the database and return new ones."""
         conn = sqlite3.connect(self.database_path)
@@ -332,6 +453,10 @@ class PressReleaseMonitor:
                     current_time,
                     current_time
                 ))
+                
+                # Get the ID of the inserted row
+                release['id'] = cursor.lastrowid
+                
                 # Add company name to the release data for notifications
                 release['company_name'] = self.company_name
                 new_releases.append(release)
@@ -347,9 +472,15 @@ class PressReleaseMonitor:
         
         logger.info(f"Found {len(new_releases)} new press releases for {self.company_name}")
         return new_releases
-    
-    def send_email_notification(self, new_releases):
-        """Send email notification for new press releases."""
+            
+    def send_email_notification(self, new_releases, summaries=None):
+        """
+        Send email notification for new press releases with summaries if available.
+        
+        Args:
+            new_releases (list): List of new press releases
+            summaries (dict): Mapping of content IDs to summaries
+        """
         if not self.email_config or not new_releases:
             return
         
@@ -360,13 +491,19 @@ class PressReleaseMonitor:
             msg['To'] = self.email_config['to']
             
             content = f"New press releases detected from {self.company_name}:\n\n"
+            
             for idx, release in enumerate(new_releases, 1):
                 content += f"{idx}. {release['title']}\n"
                 content += f"   Date: {release.get('date', 'N/A')}\n"
                 content += f"   Link: {release['link']}\n"
-                if release.get('summary'):
-                    content += f"   Summary: {release['summary']}\n"
-                content += "\n"
+                
+                # Add summary if available
+                if summaries and 'content_id' in release and release['content_id'] in summaries:
+                    content += f"\n   Summary:\n{summaries[release['content_id']]}\n"
+                elif release.get('summary'):
+                    content += f"   Brief: {release['summary']}\n"
+                
+                content += "\n" + "-"*50 + "\n\n"
             
             msg.set_content(content)
             
@@ -374,7 +511,7 @@ class PressReleaseMonitor:
                 server.login(self.email_config['username'], self.email_config['password'])
                 server.send_message(msg)
                 
-            logger.info(f"Email notification sent successfully for {self.company_name}")
+            logger.info(f"Email notification with summaries sent successfully for {self.company_name}")
         except Exception as e:
             logger.error(f"Error sending email notification: {e}")
     
@@ -388,46 +525,87 @@ class PressReleaseMonitor:
         
         releases = self.extract_press_releases(soup)
         new_releases = self.save_new_releases(releases)
-        self.download_new_releases(new_releases)
         
         if new_releases:
             logger.info(f"Found {len(new_releases)} new press releases for {self.company_name}")
-            for release in new_releases:
-                logger.info(f"New release for {self.company_name}: {release['title']} - {release['link']}")
             
-            if self.email_config:
-                self.send_email_notification(new_releases)
+            # Get IDs for the new releases
+            press_release_ids = [release['id'] for release in new_releases if 'id' in release]
+            
+            # Download content of new releases
+            download_success = self.download_new_releases(new_releases)
+            
+            if download_success:
+                # Wait a moment for downloads to complete
+                time.sleep(2)
+                
+                # Get extracted content IDs
+                content_id_mapping = self.get_extracted_content_ids(press_release_ids)
+                
+                # Add content IDs to release objects for reference
+                for release in new_releases:
+                    if 'id' in release and release['id'] in content_id_mapping:
+                        release['content_id'] = content_id_mapping[release['id']]
+                
+                # Generate summaries for new content
+                content_ids = list(content_id_mapping.values())
+                summaries = self.summarize_content(content_ids)
+                
+                # Log the new releases
+                for release in new_releases:
+                    logger.info(f"New release for {self.company_name}: {release['title']} - {release['link']}")
+                
+                # Send email notification with summaries
+                if self.email_config:
+                    self.send_email_notification(new_releases, summaries)
+            else:
+                # Send email notification without summaries
+                if self.email_config:
+                    self.send_email_notification(new_releases)
         else:
             logger.info(f"No new press releases found for {self.company_name}")
         
         return new_releases
 
 
-def run_daily_check(url, company_name, extractor_path=None, email_config=None):
+def run_daily_check(url, company_name, extractor_path=None, email_config=None, summarization_model="llama3.2"):
     """Run the press release check once."""
-    monitor = PressReleaseMonitor(url, company_name, extractor_path=extractor_path, email_config=email_config)
+    monitor = PressReleaseMonitor(
+        url, 
+        company_name, 
+        extractor_path=extractor_path, 
+        email_config=email_config,
+        summarization_model=summarization_model
+    )
     return monitor.check_for_updates()
 
 
-def setup_scheduled_checks(url, company_name, time_of_day="09:00", extractor_path=None, email_config=None):
+def setup_scheduled_checks(url, company_name, time_of_day="09:00", extractor_path=None, 
+                           email_config=None, summarization_model="llama3.2"):
     """Set up scheduled daily checks."""
     logger.info(f"Setting up scheduled checks for {company_name} at {url} at {time_of_day} daily")
     
-    monitor = PressReleaseMonitor(url, company_name, extractor_path=extractor_path, email_config=email_config)
+    monitor = PressReleaseMonitor(
+        url, 
+        company_name, 
+        extractor_path=extractor_path, 
+        email_config=email_config,
+        summarization_model=summarization_model
+    )
     
     # Run an immediate check
     monitor.check_for_updates()
     
-    # def job():
-    #     monitor.check_for_updates()
+    def job():
+        monitor.check_for_updates()
     
-    # schedule.every().day.at(time_of_day).do(job)
+    schedule.every().day.at(time_of_day).do(job)
     
-    # logger.info(f"Scheduled daily checks for {company_name} at {time_of_day}")
-    # return monitor
+    logger.info(f"Scheduled daily checks for {company_name} at {time_of_day}")
+    return monitor
 
 
-def run_multiple_companies(companies, email_config=None):
+def run_multiple_companies(companies, email_config=None, summarization_model="llama3.2"):
     """
     Run checks for multiple companies.
     
@@ -435,6 +613,7 @@ def run_multiple_companies(companies, email_config=None):
         companies (list): List of dictionaries containing company information
                           Each dict should have 'name', 'url', and optionally 'extractor'
         email_config (dict): Email configuration for notifications
+        summarization_model (str): Model to use for summarization
     """
     monitors = []
     
@@ -444,7 +623,8 @@ def run_multiple_companies(companies, email_config=None):
             url=company['url'],
             company_name=company['name'],
             extractor_path=company.get('extractor'),
-            email_config=email_config
+            email_config=email_config,
+            summarization_model=summarization_model
         )
         
         # Run an immediate check
@@ -453,7 +633,7 @@ def run_multiple_companies(companies, email_config=None):
     
     # Schedule daily checks for all companies
     for i, company in enumerate(companies):
-        time_offset = i * 1  # Stagger checks by 5 minutes per company
+        time_offset = i * 5  # Stagger checks by 5 minutes per company
         hour = 9
         minute = time_offset % 60
         hour += time_offset // 60
@@ -471,6 +651,7 @@ def run_multiple_companies(companies, email_config=None):
 
 if __name__ == "__main__":
     import argparse
+    import sys
     
     parser = argparse.ArgumentParser(description='Monitor press releases from company websites')
     parser.add_argument('--url', required=False, help='URL of the press release page')
@@ -478,6 +659,7 @@ if __name__ == "__main__":
     parser.add_argument('--extractor', help='Path to custom extractor function')
     parser.add_argument('--time', default="09:00", help='Time to run the daily check (HH:MM)')
     parser.add_argument('--config', help='Path to JSON file with multiple company configurations')
+    parser.add_argument('--model', default="llama3.2", help='Ollama model to use for summarization')
     
     args = parser.parse_args()
     
@@ -485,10 +667,10 @@ if __name__ == "__main__":
     EMAIL_CONFIG = {
         'smtp_server': 'smtp.gmail.com',
         'smtp_port': 465,
-        'username': 'your_email@gmail.com',
-        'password': 'your_app_password',
-        'from': 'your_email@gmail.com',
-        'to': 'recipient@example.com'
+        'username': 'f.kai.ye03@gmail.com',
+        'password': '6866449yfkhh',
+        'from': 'f.kai.ye03@gmail.com',
+        'to': 'f.kai.ye03@example.com'
     }
     
     # If config file is provided, load multiple companies
@@ -497,7 +679,11 @@ if __name__ == "__main__":
         try:
             with open(args.config, 'r') as f:
                 companies = json.load(f)
-            run_multiple_companies(companies, email_config=EMAIL_CONFIG)
+            run_multiple_companies(
+                companies, 
+                email_config=EMAIL_CONFIG,
+                summarization_model=args.model
+            )
         except Exception as e:
             logger.error(f"Error loading config file: {e}")
             sys.exit(1)
@@ -508,7 +694,8 @@ if __name__ == "__main__":
             company_name=args.company,
             time_of_day=args.time,
             extractor_path=args.extractor,
-            email_config=EMAIL_CONFIG
+            email_config=EMAIL_CONFIG,
+            summarization_model=args.model
         )
         
         # Run the schedule
@@ -534,7 +721,8 @@ if __name__ == "__main__":
             url=companies[0]["url"],
             company_name=companies[0]["name"],
             extractor_path=companies[0]["extractor"],
-            email_config=EMAIL_CONFIG
+            email_config=EMAIL_CONFIG,
+            summarization_model=args.model
         )
         
         # Run the schedule
