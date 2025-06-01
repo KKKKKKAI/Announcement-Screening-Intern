@@ -14,6 +14,9 @@ import ollama
 from email.message import EmailMessage
 from datetime import datetime
 import schedule
+import json
+import getpass
+
 
 # Set up logging
 logging.basicConfig(
@@ -648,6 +651,59 @@ def run_multiple_companies(companies, email_config=None, summarization_model="ll
         schedule.run_pending()
         time.sleep(60)
 
+def load_email_config(config_file=None):
+    """
+    Load email configuration from a file or prompt for input.
+    
+    Args:
+        config_file (str): Path to JSON file containing email configuration
+        
+    Returns:
+        dict: Email configuration dictionary
+    """
+    if config_file and os.path.exists(config_file):
+        try:
+            with open(config_file, 'r') as f:
+                email_config = json.load(f)
+                logger.info(f"Loaded email configuration from {config_file}")
+                return email_config
+        except Exception as e:
+            logger.error(f"Error loading email config file: {e}")
+    
+    # If no valid config file, prompt for input
+    print("\nEmail Configuration Setup")
+    print("-" * 30)
+    
+    email_config = {}
+    
+    # Get email settings
+    email_config['smtp_server'] = input("SMTP Server (e.g., smtp.gmail.com): ").strip()
+    email_config['smtp_port'] = int(input("SMTP Port (e.g., 465 for SSL): ").strip())
+    email_config['username'] = input("Email username: ").strip()
+    
+    # For security, use getpass for password
+    email_config['password'] = getpass.getpass("Email password (or app password): ")
+    
+    email_config['from'] = input("From email address: ").strip()
+    email_config['to'] = input("To email address(es) (comma-separated): ").strip()
+    
+    # Option to save the configuration
+    save_config = input("\nSave email configuration to file? (y/n): ").strip().lower()
+    if save_config == 'y':
+        config_filename = input("Configuration filename (default: email_config.json): ").strip()
+        if not config_filename:
+            config_filename = "email_config.json"
+        
+        try:
+            with open(config_filename, 'w') as f:
+                json.dump(email_config, f, indent=2)
+            print(f"Configuration saved to {config_filename}")
+            print("WARNING: This file contains your email password. Keep it secure!")
+        except Exception as e:
+            logger.error(f"Error saving configuration: {e}")
+    
+    return email_config
+
 
 if __name__ == "__main__":
     import argparse
@@ -660,18 +716,17 @@ if __name__ == "__main__":
     parser.add_argument('--time', default="09:00", help='Time to run the daily check (HH:MM)')
     parser.add_argument('--config', help='Path to JSON file with multiple company configurations')
     parser.add_argument('--model', default="llama3.2", help='Ollama model to use for summarization')
+    parser.add_argument('--email-config', help='Path to JSON file with email configuration')
+    parser.add_argument('--no-email', action='store_true', help='Disable email notifications')
     
     args = parser.parse_args()
     
-    # Email configuration - update with your details or load from a config file
-    EMAIL_CONFIG = {
-        'smtp_server': 'smtp.gmail.com',
-        'smtp_port': 465,
-        'username': 'f.kai.ye03@gmail.com',
-        'password': '6866449yfkhh',
-        'from': 'f.kai.ye03@gmail.com',
-        'to': 'f.kai.ye03@example.com'
-    }
+    # Load email configuration
+    if args.no_email:
+        EMAIL_CONFIG = None
+        logger.info("Email notifications disabled")
+    else:
+        EMAIL_CONFIG = load_email_config(args.email_config)
     
     # If config file is provided, load multiple companies
     if args.config:
@@ -704,29 +759,20 @@ if __name__ == "__main__":
             schedule.run_pending()
             time.sleep(60)
     else:
-        # Example usage with hardcoded values
-        companies = [
-            {
-                "name": "Thames Water",
-                "url": "https://www.thameswater.co.uk/about-us/newsroom/latest-news",
-                "extractor": "extractors/thames_water.py"
-            }
-        ]
-        
-        # Uncomment to run multiple companies
-        # run_multiple_companies(companies, email_config=EMAIL_CONFIG)
-        
-        # Or run a single company
-        setup_scheduled_checks(
-            url=companies[0]["url"],
-            company_name=companies[0]["name"],
-            extractor_path=companies[0]["extractor"],
-            email_config=EMAIL_CONFIG,
-            summarization_model=args.model
-        )
-        
-        # Run the schedule
-        logger.info("Starting scheduler...")
-        while True:
-            schedule.run_pending()
-            time.sleep(60)
+        # Example usage
+        print("\nExample usage:")
+        print("Single company monitoring:")
+        print(f"  python {sys.argv[0]} --url https://example.com/news --company 'Example Corp' --email-config email_config.json")
+        print("\nMultiple companies monitoring:")
+        print(f"  python {sys.argv[0]} --config companies.json --email-config email_config.json")
+        print("\nWithout email notifications:")
+        print(f"  python {sys.argv[0]} --url https://example.com/news --company 'Example Corp' --no-email")
+        print("\nCompanies config file format:")
+        print('''[
+    {
+        "name": "Company Name",
+        "url": "https://example.com/news/",
+        "extractor": "extractors/company_extractor.py"
+    }
+]''')
+        sys.exit(1)

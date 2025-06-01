@@ -1,0 +1,8 @@
+{
+  "smtp_server": "smtp.gmail.com",
+  "smtp_port": 465,
+  "username": "example@gmail.com",
+  "password": "gmail API password",   
+  "from": "example@gmail.com",
+  "to": "user@gmail.com"
+}
