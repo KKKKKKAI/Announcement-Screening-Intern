@@ -21,10 +21,6 @@ A Python-based automated monitoring system that tracks company press releases, s
   - [Workflow](#workflow)
   - [Troubleshooting](#troubleshooting)
   - [Examples](#examples)
-  - [Security Considerations](https://www.google.com/search?q=%23security-considerations)
-  - [Contributing](https://www.google.com/search?q=%23contributing)
-  - [License](https://www.google.com/search?q=%23license)
-  - [Support](https://www.google.com/search?q=%23support)
 
 ## Features
 
