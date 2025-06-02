@@ -16,7 +16,7 @@ A Python-based automated monitoring system that tracks company press releases, s
   - [Core Components](#core-components)
   - [Usage Guide](#usage-guide)
   - [Configuration](#configuration)
-  - [Auto Extractor Generator Manual](#auto-extractor-generator-manual)
+  - [Extractor Generator](#extractor-generator)
   - [Database Structure](#database-structure)
   - [Workflow](#workflow)
   - [Troubleshooting](#troubleshooting)
@@ -228,9 +228,7 @@ python press_release_monitor.py \
 
 \*Required unless using `--config` for multiple companies
 
------
-
-## Auto Extractor Generator Manual
+## Extractor Generator
 
 The `extractor_generator.py` script automates the creation of custom press release extractors using Ollama. This tool analyzes the HTML structure of a given URL and generates a Python function tailored to extract relevant information.
 
