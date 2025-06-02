@@ -1,6 +1,7 @@
 downloaded_pages
 extractors
 summaries
+email_config.json
 __pycache__/
 press_release_monitor.log
 press_releases.db
