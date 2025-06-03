@@ -1,7 +1,3 @@
-Here's your updated README file, with the "Custom Extractors" section replaced by a manual for your auto extractor generator script.
-
------
-
 # Press Release Monitor
 
 ## Building an agentic intern to help monitoring company's news relating to interest of transactions
